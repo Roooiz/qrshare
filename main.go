@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
@@ -14,10 +16,49 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 )
 
-// getLocalIP returns the first non-loopback IPv4 address found on the machine.
+// generateToken creates a cryptographically secure, URL-safe random string.
+func generateToken() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("Failed to generate token: %v", err)
+	}
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+// requireAuth middleware checks for a valid session cookie or query token.
+// If a valid query token is found, it upgrades it to a cookie for seamless navigation.
+func requireAuth(validToken string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("qrshare_token")
+		hasValidCookie := err == nil && cookie.Value == validToken
+		hasValidQuery := r.URL.Query().Get("token") == validToken
+
+		if hasValidCookie || hasValidQuery {
+			// Upgrade query token to cookie for persistent, clean-URL navigation
+			if !hasValidCookie && hasValidQuery {
+				http.SetCookie(w, &http.Cookie{
+					Name:     "qrshare_token",
+					Value:    validToken,
+					Path:     "/",
+					HttpOnly: true, // Prevents XSS theft
+					MaxAge:   86400, // 1 day
+				})
+				// Redirect to clean URL without the query parameter
+				r.URL.RawQuery = ""
+				http.Redirect(w, r, r.URL.String(), http.StatusFound)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		http.Error(w, "Unauthorized: Please scan the QR code or provide a valid token.", http.StatusUnauthorized)
+	})
+}
+
 func getLocalIP() string {
 	addrs, err := net.InterfaceAddrs()
-		if err != nil {
+	if err != nil {
 		return "127.0.0.1"
 	}
 	for _, addr := range addrs {
@@ -30,7 +71,6 @@ func getLocalIP() string {
 	return "127.0.0.1"
 }
 
-// validateDir ensures the given path exists and is a directory.
 func validateDir(path string) error {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
@@ -45,7 +85,6 @@ func validateDir(path string) error {
 	return nil
 }
 
-// parseMaxSize parses a human-readable size string (e.g. "100MB", "1GB") into bytes.
 func parseMaxSize(s string) (int64, error) {
 	s = strings.TrimSpace(strings.ToUpper(s))
 	multipliers := map[string]int64{
@@ -73,7 +112,6 @@ func parseMaxSize(s string) (int64, error) {
 	return num, nil
 }
 
-// sanitizeFilename strips directory components to prevent path traversal.
 func sanitizeFilename(name string) string {
 	base := filepath.Base(name)
 	base = strings.TrimLeft(base, ".")
@@ -83,7 +121,6 @@ func sanitizeFilename(name string) string {
 	return base
 }
 
-// isSafePath ensures the destination path is strictly inside the shared directory.
 func isSafePath(sharedDir, destPath string) bool {
 	absShared, err1 := filepath.Abs(sharedDir)
 	absDest, err2 := filepath.Abs(destPath)
@@ -93,7 +130,6 @@ func isSafePath(sharedDir, destPath string) bool {
 	return absDest == absShared || strings.HasPrefix(absDest, absShared+string(os.PathSeparator))
 }
 
-// uniquePath returns a non-existing path by appending " (1)", " (2)", etc.
 func uniquePath(path string) string {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return path
@@ -108,7 +144,6 @@ func uniquePath(path string) string {
 	}
 }
 
-// formatBytes converts bytes into a human-readable string.
 func formatBytes(b int64) string {
 	const unit = 1024
 	if b < unit {
@@ -122,9 +157,15 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// rootHandler serves the main dashboard with the upload form and a link to browse files.
+// rootHandler no longer needs to inject tokens into HTML, the browser handles the cookie.
 func rootHandler(maxSize int64) http.HandlerFunc {
-	dashboardHTML := `<!DOCTYPE html>
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.Redirect(w, r, "/files/", http.StatusSeeOther)
+			return
+		}
+
+		dashboardHTML := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -158,19 +199,13 @@ func rootHandler(maxSize int64) http.HandlerFunc {
 
     <a href="/files/" class="browse-btn">📂 Browse & Download Files</a>
 </body>
-</html>`
+</html>`, formatBytes(maxSize))
 
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.Redirect(w, r, "/files/", http.StatusSeeOther)
-			return
-		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, dashboardHTML, formatBytes(maxSize))
+		fmt.Fprint(w, dashboardHTML)
 	}
 }
 
-// uploadHandler processes the file upload POST request.
 func uploadHandler(sharedDir string, maxSize int64) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -261,22 +296,27 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
+	token := generateToken()
 	ip := getLocalIP()
-	url := fmt.Sprintf("http://%s:%s", ip, *port)
+	
+	// QR code still uses the query parameter for the initial "handshake"
+	secureURL := fmt.Sprintf("http://%s:%s/?token=%s", ip, *port, token)
 
 	fmt.Printf("📂 Sharing: %s\n", absDir)
-	fmt.Printf("🌐 Dashboard: %s\n", url)
-	fmt.Printf("📂 Files:     %s/files/\n\n", url)
+	fmt.Printf("🔐 Secured with session cookie (Zero-Click via QR)\n")
+	fmt.Printf("🌐 Dashboard: http://%s:%s/\n", ip, *port)
+	fmt.Printf("📂 Files:     http://%s:%s/files/\n\n", ip, *port)
 
-	qr, err := qrcode.New(url, qrcode.Medium)
+	qr, err := qrcode.New(secureURL, qrcode.Medium)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println(qr.ToSmallString(false))
 
-	http.HandleFunc("/", rootHandler(maxSize))
-	http.HandleFunc("/upload", uploadHandler(absDir, maxSize))
-	http.Handle("/files/", http.StripPrefix("/files/", http.FileServer(http.Dir(absDir))))
+	// Wrap ALL handlers with the smart cookie/query middleware
+	http.Handle("/", requireAuth(token, rootHandler(maxSize)))
+	http.Handle("/upload", requireAuth(token, uploadHandler(absDir, maxSize)))
+	http.Handle("/files/", requireAuth(token, http.StripPrefix("/files/", http.FileServer(http.Dir(absDir)))))
 
 	fmt.Println("🚀 Server running. Press Ctrl+C to stop.")
 	log.Fatal(http.ListenAndServe(":"+*port, nil))
