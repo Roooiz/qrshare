@@ -1,0 +1,34 @@
+# === Binaries and build artifacts ===
+# Windows
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test binaries
+*.test
+*.out
+
+# Compiled binary folders
+bin/
+build/
+dist/
+out/
+
+# A specific binary of the current project (just in case it is at the root)
+qrshare
+qrshare.exe
+
+# === Dependencies and cache ===
+vendor/
+go.work
+go.work.sum
+
+# === IDE and OC ===
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
