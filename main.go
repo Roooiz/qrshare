@@ -87,21 +87,26 @@ func validateDir(path string) error {
 
 func parseMaxSize(s string) (int64, error) {
 	s = strings.TrimSpace(strings.ToUpper(s))
-	multipliers := map[string]int64{
-		"B":  1,
-		"KB": 1024,
-		"MB": 1024 * 1024,
-		"GB": 1024 * 1024 * 1024,
+
+	type multiplier struct {
+		suffix string
+		mult   int64
+	}
+	multipliers := []multiplier{
+		{"GB", 1024 * 1024 * 1024},
+		{"MB", 1024 * 1024},
+		{"KB", 1024},
+		{"B", 1},
 	}
 
-	for suffix, mult := range multipliers {
-		if strings.HasSuffix(s, suffix) {
-			numStr := strings.TrimSuffix(s, suffix)
+	for _, m := range multipliers {
+		if strings.HasSuffix(s, m.suffix) {
+			numStr := strings.TrimSuffix(s, m.suffix)
 			var num float64
 			if _, err := fmt.Sscanf(numStr, "%f", &num); err != nil {
 				return 0, fmt.Errorf("invalid size: %s", s)
 			}
-			return int64(num * float64(mult)), nil
+			return int64(num * float64(m.mult)), nil
 		}
 	}
 
